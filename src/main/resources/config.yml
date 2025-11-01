@@ -1,0 +1,17 @@
+config_version: 1
+
+database:
+  file: "hideandseek.db"
+
+lobby:
+  duration: 15 # This is how much time (in secods) the players gonna spend in lobby waiting for game start
+
+match:
+  hideTime: 30 # sets the default time for hiders to hide (in seconds)
+  seekTime: 60 # sets the default time for seekers to find hiders (in seconds)
+  maxSeeker: 3 # sets how many seekers can be choosen max for a single game (player count in the lobby might affect it)
+
+teams:
+  hiders:
+    viewRange: 64f
+  seekers: {}

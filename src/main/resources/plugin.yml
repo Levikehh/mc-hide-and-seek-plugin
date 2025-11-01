@@ -1,0 +1,14 @@
+name: HideAndSeek
+version: 1.0.0
+main: me.levikehh.hideandseek.HideAndSeek
+api-version: 1.21.9
+author: levikethingz
+description: A hide and seek minigame plugin
+
+commands:
+  hideandseek:
+    description: Hide and seek root
+    usage: /hideandseek
+
+permissions:
+  debug.game: { default: op }
