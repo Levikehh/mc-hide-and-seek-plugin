@@ -66,12 +66,6 @@ public class MatchManager {
                 this.plugin.config().match().seekTime());
 
         this.plugin.getTeamManager().assignTeams(match, lobby.getPlayers());
-        for (Player player : match.getHiders()) {
-            this.plugin.getMechanicsManager().applyHiderDisguise(player);
-        }
-        for (Player player : match.getSeekers()) {
-            this.plugin.getMechanicsManager().lockSeeker(player);
-        }
 
         match.setState(MatchState.HIDE_PHASE);
         lobby.setMatch(match);
@@ -79,6 +73,13 @@ public class MatchManager {
         this.matches.put(match.getId(), match);
 
         this.plugin.getGameManager().onMatchStarted(lobby, match);
+
+        for (Player player : match.getHiders()) {
+            this.plugin.getMechanicsManager().applyHiderDisguise(player);
+        }
+        for (Player player : match.getSeekers()) {
+            this.plugin.getMechanicsManager().lockSeeker(player);
+        }
 
         TimedTask<Match> hideTask = this.plugin.getTimer().startTimer(
                 "hide_phase_" + match.getId(),

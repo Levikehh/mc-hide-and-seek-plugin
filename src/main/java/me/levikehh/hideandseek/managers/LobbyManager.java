@@ -78,7 +78,7 @@ public class LobbyManager {
                     }
                 },
                 () -> {
-                    if (lobby.getPlayerCount() > 1) {
+                    if (lobby.getPlayerCount() >= 2) {
                         this.matchManager.startMatch(lobby);
                     } else {
                         for (Player lobbyPlayer : lobby.getPlayers()) {

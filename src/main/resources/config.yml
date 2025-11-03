@@ -13,5 +13,8 @@ match:
 
 teams:
   hiders:
-    viewRange: 64f
+    viewRange: 64.0 # sets how far the displayed cover should be seen
+    solidifyCooldown: 5.0 # sets how much time a hider needs before they can solidify again (in seconds)
+    timeToSolid: 3.0 # sets how much time it takes to become solid (in seconds)
+    health: 3 # sets the hider's cover health
   seekers: {}

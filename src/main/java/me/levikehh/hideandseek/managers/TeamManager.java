@@ -62,8 +62,6 @@ public class TeamManager {
         this.roleByMatch.put(matchId, roleMap);
         this.hidersByMatch.put(matchId, hiderIds);
         this.seekersByMatch.put(matchId, seekerIds);
-
-        // TODO apply team effects
     }
 
     public void convertHiderToSeeker(Match match, Player player) {
@@ -146,7 +144,7 @@ public class TeamManager {
         int playerCount = players.size();
         int seekerCount = this.getSeekerCount(playerCount, 3);
 
-        List<Player> shuffled = new ArrayList<>();
+        List<Player> shuffled = new ArrayList<>(players);
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
         for (int i = 0; i < seekerCount; i++) {

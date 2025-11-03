@@ -7,11 +7,13 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.player.PlayerAnimationType;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 
+import io.papermc.paper.event.player.PlayerArmSwingEvent;
 import me.levikehh.hideandseek.HideAndSeek;
 import me.levikehh.hideandseek.managers.MechanicsManager;
 import me.levikehh.hideandseek.models.BlockPosition;
@@ -38,10 +40,12 @@ public class MechanicsListener implements Listener {
         boolean isHider = this.plugin.getTeamManager().isHider(match, player);
         boolean isSeeker = this.plugin.getTeamManager().isSeeker(match, player);
 
-        this.mechanics.handleHiderMove(player, event.getFrom(), event.getTo());
+        if (isHider) {
+            this.mechanics.handleHiderMove(player, event.getFrom(), event.getTo());
 
-        if (isHider && this.mechanics.isSolid(player) && this.checkIsMoved(event)) {
-            this.plugin.getServer().getScheduler().runTask(this.plugin, () -> player.teleport(event.getFrom()));
+            if (this.mechanics.isHiderLocked(player) && this.checkIsMoved(event)) {
+                plugin.getServer().getScheduler().runTask(plugin, () -> player.teleport(event.getFrom()));
+            }
         }
 
         if (isSeeker && this.mechanics.isSeekerLocked(player) && this.checkIsMoved(event)) {
@@ -61,7 +65,7 @@ public class MechanicsListener implements Listener {
             return;
         }
 
-        if (event.getCause() == EntityDamageEvent.DamageCause.SUFFOCATION && this.mechanics.isSolid(player)) {
+        if (event.getCause() == EntityDamageEvent.DamageCause.SUFFOCATION && this.mechanics.isHiderLocked(player)) {
             event.setCancelled(true);
         }
     }
@@ -72,17 +76,50 @@ public class MechanicsListener implements Listener {
             return;
         }
 
-        if (event.getClickedBlock() == null) {
+        Player player = event.getPlayer();
+        Match match = this.plugin.getGameManager().getMatch(player);
+        if (match == null) {
             return;
         }
 
-        Block block = event.getClickedBlock();
-        if (!this.mechanics.getDisguises().containsKey(BlockPosition.of(block))) {
+        boolean isSeeker = this.plugin.getTeamManager().isSeeker(match, player);
+
+        if (isSeeker) {
+            if (event.getClickedBlock() == null) {
+                return;
+            }
+
+            Block block = event.getClickedBlock();
+            if (!this.mechanics.getSolidBlockOwners().containsKey(BlockPosition.of(block))) {
+                return;
+            }
+
+            event.setCancelled(true);
+            this.mechanics.hitSolidBlock(block, event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPlayerArmSwing(PlayerArmSwingEvent event) {
+        Player player = event.getPlayer();
+        Match match = this.plugin.getGameManager().getMatch(player);
+        if (match == null) {
             return;
         }
 
-        event.setCancelled(true);
-        this.mechanics.hitSolidBlock(block, event.getPlayer());
+        if (event.getAnimationType() != PlayerAnimationType.ARM_SWING) {
+            return;
+        }
+
+        boolean isHider = this.plugin.getTeamManager().isHider(match, player);
+
+        if (!isHider) {
+            return;
+        }
+        if (!this.mechanics.isHiderLocked(player)) {
+            return;
+        }
+        this.mechanics.forceExitSolidHider(player, "self_release");
     }
 
     @EventHandler

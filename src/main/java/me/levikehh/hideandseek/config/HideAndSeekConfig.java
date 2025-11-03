@@ -23,7 +23,10 @@ public record HideAndSeekConfig(
             Hider hiders,
             Seeker seekers) {
         public record Hider(
-                @Min(32) float viewRange) {
+                @Min(32) float viewRange,
+                @Min(1) float solidifyCooldown,
+                @Min(2) float timeToSolid,
+                @Min(3) int health) {
         }
 
         public record Seeker() {

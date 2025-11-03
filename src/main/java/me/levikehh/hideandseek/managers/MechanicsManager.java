@@ -3,6 +3,7 @@ package me.levikehh.hideandseek.managers;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -30,6 +31,8 @@ import org.joml.Vector3f;
 
 import me.levikehh.hideandseek.HideAndSeek;
 import me.levikehh.hideandseek.models.BlockPosition;
+import me.levikehh.hideandseek.models.HiderForm;
+import me.levikehh.hideandseek.models.HiderStatus;
 import me.levikehh.hideandseek.models.SolidState;
 
 public class MechanicsManager {
@@ -39,10 +42,9 @@ public class MechanicsManager {
     private final Predicate<Player> isHider;
     private final Predicate<Player> isSeeker;
     // HIDER
-    private final Map<UUID, UUID> disguiseEntityByPlayer;
-    private final Map<UUID, SolidState> solidBlockByPlayer;
-    private final Map<UUID, Long> lastMovedAtMS;
-    private final Map<BlockPosition, UUID> disguiseAtLocation;
+    private final Map<UUID, HiderStatus> hiders;
+    private final Map<BlockPosition, UUID> solidBlockOwners;
+    private final Map<UUID, Float> prevHiderWalkSpeeds;
 
     // SEEKER
     private final Set<UUID> lockedSeekers;
@@ -52,12 +54,15 @@ public class MechanicsManager {
         this.plugin = plugin;
         this.isHider = isHider;
         this.isSeeker = isSeeker;
-        this.disguiseEntityByPlayer = new HashMap<>();
-        this.lastMovedAtMS = new HashMap<>();
-        this.disguiseAtLocation = new HashMap<>();
-        this.solidBlockByPlayer = new HashMap<>();
+
+        this.hiders = new HashMap<>();
+        this.solidBlockOwners = new HashMap<>();
+        this.prevHiderWalkSpeeds = new HashMap<>();
+
         this.lockedSeekers = new HashSet<>();
         this.prevSeekerWalkSpeeds = new HashMap<>();
+
+        this.plugin.getServer().getScheduler().runTaskTimer(this.plugin, () -> this.mechanicsTick(), 5L, 5L);
     }
 
     public static MechanicsManager getInstance(HideAndSeek plugin, Predicate<Player> isHider,
@@ -69,15 +74,80 @@ public class MechanicsManager {
         return instance;
     }
 
+    private void mechanicsTick() {
+        long now = System.currentTimeMillis();
+
+        for (Map.Entry<UUID, HiderStatus> entry : this.hiders.entrySet()) {
+            UUID playerId = entry.getKey();
+            HiderStatus status = entry.getValue();
+            Player player = Bukkit.getPlayer(playerId);
+            if (player == null) {
+                continue;
+            }
+
+            // TODO check if we ever get log from here, if so we have an issue
+            if (!this.isHider.test(player)) {
+                this.plugin.getLogger().warning(
+                        "In mechanicsTick we just iterated through a non-hider player. (List should only contain hiders)");
+                continue;
+            }
+
+            if (status.form == HiderForm.MOVING) {
+                long stillFor = now - status.lastMovedAtMs;
+                long timeLeftUntilSolid = (long) (this.plugin.config().teams().hiders().timeToSolid() * 1000)
+                        - stillFor;
+                if (timeLeftUntilSolid <= 0 && now >= status.nextAllowedSolidifyAt) {
+                    this.enterLockInternal(player, status);
+                    continue;
+                }
+
+                float progress = stillFor / (float) (this.plugin.config().teams().hiders().timeToSolid() * 1000f);
+                progress = Math.clamp(progress, 0.0f, 1.0f);
+
+                player.setExp(progress);
+                player.setLevel(0);
+            } else if (status.form == HiderForm.LOCKED) {
+                long remainingCooldownMs = status.nextAllowedSolidifyAt - now;
+                remainingCooldownMs = Math.max(remainingCooldownMs, 0);
+
+                float progress = 1.0f
+                        - (remainingCooldownMs
+                                / (float) (this.plugin.config().teams().hiders().solidifyCooldown() * 1000f));
+                progress = Math.clamp(progress, 0.0f, 1.0f);
+
+                player.setExp(progress);
+                player.setLevel(0);
+            }
+        }
+    }
+
     public void applyHiderDisguise(Player player) {
-        this.removeHiderDisguise(player);
+        HiderStatus status = this.hiders.computeIfAbsent(player.getUniqueId(), (id) -> {
+            HiderStatus newStatus = new HiderStatus();
+            newStatus.form = HiderForm.MOVING;
+            newStatus.lastMovedAtMs = System.currentTimeMillis();
+            newStatus.nextAllowedSolidifyAt = 0;
+            newStatus.originalExperience = player.getExp();
+            newStatus.originalLevel = player.getLevel();
+            return newStatus;
+        });
+
+        if (status.form == HiderForm.LOCKED) {
+            this.exitLockInternal(player, status, false, false);
+        }
 
         player.setInvisible(true);
+        player.setCollidable(false);
 
-        BlockDisplay displayEntity = this.spawnDisguiseEntityAt(this.normalizeLocation(player.getLocation()));
+        if (status.blockDisplayId == null || this.findEntityByUUID(status.blockDisplayId) == null) {
+            BlockDisplay displayEntity = this.spawnDisguiseEntityAt(this.normalizeLocation(player.getLocation()));
+            status.blockDisplayId = displayEntity.getUniqueId();
+        } else {
 
-        this.disguiseEntityByPlayer.put(player.getUniqueId(), displayEntity.getUniqueId());
-        this.lastMovedAtMS.put(player.getUniqueId(), System.currentTimeMillis());
+        }
+
+        status.form = HiderForm.MOVING;
+        status.lastMovedAtMs = System.currentTimeMillis();
     }
 
     public void handleHiderMove(Player player, Location from, Location to) {
@@ -85,132 +155,68 @@ public class MechanicsManager {
             return;
         }
 
-        if (this.isSolid(player)) {
+        HiderStatus status = this.hiders.get(player.getUniqueId());
+        if (status == null) {
+            return;
+        }
+
+        boolean isMoved = checkIsMoved(from, to);
+        if (status.form == HiderForm.LOCKED) {
             return;
         }
 
         long now = System.currentTimeMillis();
-
-        if (this.checkIsMoved(from, to)) {
-            this.lastMovedAtMS.put(player.getUniqueId(), now);
+        if (isMoved) {
+            status.lastMovedAtMs = now;
         }
 
-        this.updateDisguisePosition(player, to);
-
-        if (!this.solidBlockByPlayer.containsKey(player.getUniqueId())) {
-            this.maybeAutoSolidify(player, now);
+        if (status.blockDisplayId != null) {
+            this.updateDisguisePosition(status.blockDisplayId, to);
         }
     }
 
-    public void removeHiderDisguise(Player player) {
-        this.removeDisguiseEntity(player);
-        player.setInvisible(false);
-        this.disguiseEntityByPlayer.remove(player.getUniqueId());
-        lastMovedAtMS.remove(player.getUniqueId());
-    }
-
-    public boolean solidify(Player player) {
-        if (!isHider.test(player)) {
-            return false;
+    public void forceExitSolidHider(Player player, String reason) {
+        HiderStatus status = this.hiders.get(player.getUniqueId());
+        if (status == null) {
+            return;
         }
 
-        if (this.isSolid(player)) {
-            return false;
+        if (status.form != HiderForm.LOCKED) {
+            return;
         }
 
-        Material material = Material.COBBLESTONE;
-        Block base = player.getLocation().getBlock();
-        Block above = base.getRelative(0, 1, 0);
-
-        if (!base.isEmpty() || !above.isEmpty()) {
-            return false;
-        }
-
-        // Disallow solidify on certain blocks
-        Block under = base.getRelative(0, -1, 0);
-        if (under.getType() == Material.AIR) {
-            return false;
-        }
-
-        BlockPosition position = BlockPosition.of(base);
-        if (this.disguiseAtLocation.containsKey(position)) {
-            return false;
-        }
-
-        BlockData previousBlockData = base.getBlockData();
-        base.setBlockData(material.createBlockData(), false);
-
-        this.removeDisguiseEntity(player);
-
-        SolidState solidBlock = new SolidState(position, previousBlockData, material, 3,
-                System.currentTimeMillis() + 2000);
-
-        this.solidBlockByPlayer.put(player.getUniqueId(), solidBlock);
-        this.disguiseAtLocation.put(position, player.getUniqueId());
-
-        Location fxLocation = position.asLocation().add(0.5, 0.05, 0.5);
-        fxLocation.getWorld().playSound(fxLocation, Sound.BLOCK_STONE_PLACE, 0.8f, 1f);
-        fxLocation.getWorld().spawnParticle(Particle.BLOCK, fxLocation, 8, material.createBlockData());
-
-        return true;
-    }
-
-    public void desolidify(Player player) {
-        SolidState solidState = this.solidBlockByPlayer.get(player.getUniqueId());
-
-        if (solidState != null) {
-            Block block = solidState.position.toBlock();
-            if (block.getType() == solidState.material) {
-                block.setBlockData(solidState.previousBlockData, false);
-            }
-
-            this.disguiseAtLocation.remove(solidState.position);
-
-            solidState.cooldownUntilMs = System.currentTimeMillis() + 2000;
-        }
-
-        if (isHider.test(player)) {
-            player.setInvisible(true);
-
-            BlockDisplay blockDisplay = this.spawnDisguiseEntityAt(this.normalizeLocation(player.getLocation()));
-            this.disguiseEntityByPlayer.put(player.getUniqueId(), blockDisplay.getUniqueId());
-
-            player.setVelocity(
-                    player.getLocation().getDirection().normalize().multiply(0.2).setY(0.1));
-        } else {
-            player.setInvisible(false);
-            this.removeDisguiseEntity(player);
-        }
-    }
-
-    public boolean isSolid(Player player) {
-        return this.solidBlockByPlayer.containsKey(player.getUniqueId());
+        this.exitLockInternal(player, status, true, true);
+        this.plugin.getLogger().info("Hider " + player.getName() + " broke cover: " + reason);
     }
 
     public UUID hitSolidBlock(Block block, Player attacker) {
         BlockPosition position = BlockPosition.of(block);
-        UUID ownerId = this.disguiseAtLocation.get(position);
+        UUID ownerId = this.solidBlockOwners.get(position);
         if (ownerId == null) {
             return null;
         }
 
         Player hider = Bukkit.getPlayer(ownerId);
-        SolidState solidState = this.solidBlockByPlayer.get(ownerId);
+        if (hider == null) {
+            this.cleanupOrphanBlocks(position);
+            return null;
+        }
+        HiderStatus status = this.hiders.get(ownerId);
+        SolidState solidState = status != null ? status.solidState : null;
 
-        if (hider == null || solidState == null) {
-            this.disguiseAtLocation.remove(position);
-            this.solidBlockByPlayer.remove(ownerId);
+        if (status == null || solidState == null || status.form != HiderForm.LOCKED) {
+            this.cleanupOrphanBlocks(position);
             return null;
         }
 
-        Location fxLoc = position.asLocation().add(0.5, 0.05, 0.5);
-        fxLoc.getWorld().playSound(fxLoc, Sound.BLOCK_STONE_HIT, 0.8f, 1.2f);
-        fxLoc.getWorld().spawnParticle(Particle.BLOCK, fxLoc, 10, solidState.material.createBlockData());
+        Location effectLocation = position.asLocation().add(0.5, 0.05, 0.5);
+        effectLocation.getWorld().playSound(effectLocation, Sound.BLOCK_STONE_HIT, 0.8f, 1.2f);
+        effectLocation.getWorld().spawnParticle(Particle.BLOCK, effectLocation, 10,
+                solidState.material.createBlockData());
 
         solidState.health--;
-        if (solidState.health == 0) {
-            this.desolidify(hider);
-            return ownerId;
+        if (solidState.health <= 0) {
+            this.forceExitSolidHider(hider, "broken cover (health <= 0)");
         }
 
         return ownerId;
@@ -226,7 +232,6 @@ public class MechanicsManager {
         }
 
         this.lockedSeekers.add(player.getUniqueId());
-
         this.prevSeekerWalkSpeeds.put(player.getUniqueId(), player.getWalkSpeed());
         player.setWalkSpeed(0.0f);
 
@@ -257,6 +262,11 @@ public class MechanicsManager {
 
     public boolean isSeekerLocked(Player player) {
         return this.lockedSeekers.contains(player.getUniqueId());
+    }
+
+    public boolean isHiderLocked(Player player) {
+        HiderStatus status = this.hiders.get(player.getUniqueId());
+        return status != null && status.form == HiderForm.LOCKED;
     }
 
     private void applySeekerBlindness(Player player) {
@@ -290,11 +300,22 @@ public class MechanicsManager {
     }
 
     public void handleLeave(Player player) {
-        if (this.isSolid(player)) {
-            desolidify(player);
+        UUID playerId = player.getUniqueId();
+
+        HiderStatus status = this.hiders.get(playerId);
+        if (status != null) {
+            if (status.form == HiderForm.LOCKED) {
+                this.exitLockInternal(player, status, false, false);
+            }
+
+            this.removeDisguiseEntity(status);
+            player.setInvisible(false);
+            player.setCollidable(true);
+            player.setExp(status.originalExperience);
+            player.setLevel(status.originalLevel);
+            this.hiders.remove(playerId);
         }
 
-        this.removeHiderDisguise(player);
         this.unlockSeeker(player);
     }
 
@@ -304,31 +325,11 @@ public class MechanicsManager {
         }
     }
 
-    public Map<BlockPosition, UUID> getDisguises() {
-        return this.disguiseAtLocation;
+    public Map<BlockPosition, UUID> getSolidBlockOwners() {
+        return this.solidBlockOwners;
     }
 
     /* INTERNAL */
-
-    private void maybeAutoSolidify(Player player, long nowMS) {
-        if (!isHider.test(player)) {
-            return;
-        }
-
-        if (this.isSolid(player)) {
-            return;
-        }
-
-        long lastMove = this.lastMovedAtMS.getOrDefault(player.getUniqueId(), nowMS);
-        long stillFor = nowMS - lastMove;
-
-        SolidState solidState = this.solidBlockByPlayer.get(player.getUniqueId());
-        long cooldownUntil = solidState != null ? solidState.cooldownUntilMs : 0L;
-
-        if (stillFor >= 3000 && nowMS >= cooldownUntil) {
-            solidify(player);
-        }
-    }
 
     private BlockDisplay spawnDisguiseEntityAt(Location location) {
         Location normalized = this.normalizeLocation(location);
@@ -352,13 +353,8 @@ public class MechanicsManager {
         return blockDisplay;
     }
 
-    private void updateDisguisePosition(Player player, Location to) {
-        UUID disguiseEntityId = this.disguiseEntityByPlayer.get(player.getUniqueId());
-        if (disguiseEntityId == null) {
-            return;
-        }
-
-        Entity disguiseEntity = this.findEntityByUUID(disguiseEntityId);
+    private void updateDisguisePosition(UUID blockDisplayId, Location to) {
+        Entity disguiseEntity = this.findEntityByUUID(blockDisplayId);
         if (!(disguiseEntity instanceof BlockDisplay blockDisplay)) {
             return;
         }
@@ -373,15 +369,150 @@ public class MechanicsManager {
                 new Quaternionf()));
     }
 
-    private void removeDisguiseEntity(Player player) {
-        UUID disguiseEntityId = this.disguiseEntityByPlayer.get(player.getUniqueId());
-        if (disguiseEntityId == null) {
+    private void removeDisguiseEntity(HiderStatus status) {
+        if (status.blockDisplayId == null) {
             return;
         }
 
-        Entity disguiseEntity = this.findEntityByUUID(disguiseEntityId);
-        if (disguiseEntity != null) {
-            disguiseEntity.remove();
+        Entity entity = this.findEntityByUUID(status.blockDisplayId);
+        if (entity != null) {
+            entity.remove();
+        }
+
+        status.blockDisplayId = null;
+    }
+
+    private void enterLockInternal(Player player, HiderStatus status) {
+        if (status.form == HiderForm.LOCKED) {
+            return;
+        }
+
+        Location location = player.getLocation();
+        Block base = location.getBlock();
+        Block above = base.getRelative(0, 1, 0);
+        Block below = base.getRelative(0, -1, 0);
+
+        if (!base.isEmpty() || !above.isEmpty() || below.getType() == Material.AIR) {
+            return;
+        }
+
+        Material disguiseMaterial = Material.COBBLESTONE;
+        BlockData previousBlockData = base.getBlockData();
+
+        this.removeDisguiseEntity(status);
+        player.setInvisible(true);
+        player.setCollidable(false);
+
+        if (!this.prevHiderWalkSpeeds.containsKey(player.getUniqueId())) {
+            this.prevHiderWalkSpeeds.put(player.getUniqueId(), player.getWalkSpeed());
+        }
+
+        player.setWalkSpeed(0.0f);
+
+        BlockPosition position = BlockPosition.of(base);
+        SolidState solidState = new SolidState(position, previousBlockData, disguiseMaterial,
+                this.plugin.config().teams().hiders().health(), 0L);
+
+        status.solidState = solidState;
+        status.form = HiderForm.LOCKED;
+
+        this.solidBlockOwners.put(position, player.getUniqueId());
+
+        this.sendFakeBlockToOthers(player, status, false);
+
+        Location effectLocation = position.asLocation().add(0.5, 0.05, 0.5);
+        effectLocation.getWorld().playSound(effectLocation, Sound.BLOCK_STONE_PLACE, 0.8f, 1f);
+        effectLocation.getWorld().spawnParticle(Particle.BLOCK, effectLocation, 8, disguiseMaterial.createBlockData());
+    }
+
+    private void exitLockInternal(Player player, HiderStatus status, boolean playEffects, boolean startCooldown) {
+        if (status.form != HiderForm.LOCKED) {
+            return;
+        }
+
+        SolidState solidState = status.solidState;
+        if (solidState != null) {
+            Block block = solidState.position.toBlock();
+            if (block.getType() == solidState.material) {
+                this.sendFakeBlockToOthers(player, status, true);
+            }
+
+            this.solidBlockOwners.remove(solidState.position);
+
+            if (playEffects) {
+                Location effectLocation = solidState.position.asLocation().add(0, 0, 0);
+                effectLocation.getWorld().playSound(effectLocation, Sound.BLOCK_STONE_BREAK, 0.8f, 1.2f);
+                effectLocation.getWorld().spawnParticle(Particle.BLOCK, effectLocation, 10,
+                        solidState.material.createBlockData());
+            }
+        }
+
+        status.solidState = null;
+        status.form = HiderForm.MOVING;
+
+        Float prevWalkSpeed = this.prevHiderWalkSpeeds.get(player.getUniqueId());
+        if (prevWalkSpeed != null) {
+            player.setWalkSpeed(prevWalkSpeed);
+        } else {
+            player.setWalkSpeed(0.2f);
+        }
+
+        this.prevHiderWalkSpeeds.remove(player.getUniqueId());
+
+        player.setInvisible(true);
+        player.setCollidable(false);
+        BlockDisplay displayEntity = this.spawnDisguiseEntityAt(this.normalizeLocation(player.getLocation()));
+        status.blockDisplayId = displayEntity.getUniqueId();
+
+        long now = System.currentTimeMillis();
+        status.lastMovedAtMs = now;
+
+        if (startCooldown) {
+            status.nextAllowedSolidifyAt = now
+                    + (long) (this.plugin.config().teams().hiders().solidifyCooldown() * 1000);
+        }
+    }
+
+    private void sendFakeBlockToOthers(Player hider, HiderStatus status, boolean sendOriginal) {
+        if (status.solidState == null) {
+            return;
+        }
+
+        Location location = status.solidState.position.asLocation();
+        if (location == null) {
+            return;
+        }
+
+        List<Player> players = this.plugin.getGameManager().getLobby(hider).getPlayers();
+        if (players != null) {
+            for (Player other : players) {
+                if (other.equals(hider)) {
+                    continue;
+                }
+
+                if (other.getWorld() != hider.getWorld()) {
+                    continue;
+                }
+
+                BlockData materialToSend = !sendOriginal
+                        ? status.solidState.material.createBlockData()
+                        : status.solidState.previousBlockData;
+
+                other.sendBlockChange(location, materialToSend);
+            }
+        }
+    }
+
+    private void cleanupOrphanBlocks(BlockPosition position) {
+        UUID ownerId = this.solidBlockOwners.remove(position);
+        if (ownerId == null) {
+            return;
+        }
+
+        HiderStatus status = this.hiders.get(ownerId);
+        if (status != null && status.solidState != null && status.solidState.position.equals(position)) {
+            status.solidState = null;
+            status.form = HiderForm.MOVING;
         }
     }
 
@@ -391,9 +522,9 @@ public class MechanicsManager {
         result.setYaw(0f);
         result.setPitch(0f);
 
-        double x = Math.floor(result.getX()) + 0.5;
+        double x = Math.floor(result.getX());
         double y = Math.floor(result.getY());
-        double z = Math.floor(result.getZ()) + 0.5;
+        double z = Math.floor(result.getZ());
 
         result.setX(x);
         result.setY(y);
